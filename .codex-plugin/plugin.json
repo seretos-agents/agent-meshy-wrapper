@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Pairs the official Meshy MCP server with a skill so Claude can generate, refine, rig, animate and export 3D assets from text or images - tracking async jobs and credit cost - instead of hand-driving the Meshy API.",
   "author": { "name": "Arne von Appen" },
-  "repository": "https://github.com/Seretos/agent-meshy-wrapper",
+  "repository": "https://github.com/seretos-agents/agent-meshy-wrapper",
   "skills": "./skills",
   "interface": {
     "displayName": "Agent Meshy Wrapper",

@@ -20,8 +20,8 @@ The API key is the plugin's only configuration, and every generation spends cred
 ## Install
 
 ```
-/plugin marketplace add Seretos/agent-marketplace
-/plugin install agent-meshy-wrapper@agent-marketplace
+/plugin marketplace add seretos-agents/modular-software-factory
+/plugin install agent-meshy-wrapper@modular-software-factory
 ```
 
 ### Claude Code — the key is prompted for you
