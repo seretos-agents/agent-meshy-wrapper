@@ -153,6 +153,19 @@ def test_prev_tag_no_lower_tag_prints_nothing(r1_repo):
     assert result.stdout.strip() == ""
 
 
+def test_prev_tag_excludes_malformed_leading_zero_tag_from_selection(r1_repo):
+    # A query of 1.0.0 (used above) can't distinguish "v01.0.0 correctly
+    # excluded by grammar" from "v01.0.0 loosely parsed as 1.0.0 and then
+    # excluded only because it ties the query" -- both give the same
+    # answer, since equality also excludes. Querying above it (2.0.0) does
+    # distinguish: a parser that accepts the leading zero and reads
+    # v01.0.0 as plain 1.0.0 would select it here, since 1.0.0 outranks
+    # every correctly-grammared tag in the fixture.
+    result = run_script("prev-release-tag.sh", [PLUGIN, "2.0.0"], cwd=r1_repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == f"{PLUGIN}--v0.1.0-rc.10"
+
+
 # -- Additional edge-case coverage (not required to demonstrate RED individually) --
 
 @pytest.mark.parametrize(
@@ -197,6 +210,28 @@ def test_prev_tag_precedence_ordering_alpha_through_release(tmp_path):
 
 def _preflight_env(output_file):
     return {"DEFAULT_BRANCH": "main", "GITHUB_OUTPUT": str(output_file)}
+
+
+def test_preflight_rejects_when_marker_tag_already_exists(tmp_path):
+    # Plan R2 case (a): the src/<TAG> marker for the version being released
+    # is present on the remote -> exit 1, output names it. This is the case
+    # a re-run would hit trying to push a marker that already exists; it is
+    # distinct from the plain-<TAG>-exists case covered just below.
+    work, bare = make_repo_with_origin(tmp_path)
+    sha = _git(["rev-parse", "HEAD"], cwd=work).stdout.strip()
+    push_tag(work, f"src/{PLUGIN}--v0.2.0", sha)
+    before = ls_remote_tags(bare)
+    output_file = tmp_path / "github_output"
+    output_file.write_text("", encoding="utf-8")
+
+    result = run_script(
+        "release-preflight.sh", [PLUGIN, "0.2.0"], cwd=work, env=_preflight_env(output_file)
+    )
+
+    assert result.returncode != 0
+    assert f"src/{PLUGIN}--v0.2.0" in (result.stdout + result.stderr)
+    assert ls_remote_tags(bare) == before
+    assert output_file.read_text(encoding="utf-8") == ""
 
 
 def test_preflight_rejects_when_tag_already_exists(tmp_path):
@@ -329,7 +364,8 @@ HOSTILE_CHANGELOG = (
     "EOF\n"
     "path like /usr/bin:/tmp and C:\\x\n"
     "<script>alert(1)</script>\n"
-    "unicode \u00fc and emoji \U0001F389"
+    "unicode \u00fc and emoji \U0001F389\n"
+    "trailing newline above must survive too  \n"
 )
 
 
@@ -372,6 +408,18 @@ def test_payload_omits_empty_changelog_key():
     )
     assert client_payload["tags"] == ["3d", "creative", "ai"]
     assert len(client_payload) == 9
+
+
+def test_payload_omits_changelog_key_when_unset(monkeypatch):
+    # Distinct from the empty-string case above: CHANGELOG is not merely ""
+    # but absent from the environment entirely. A filter comparing
+    # `$ENV.CHANGELOG != ""` (rather than `($ENV.CHANGELOG // "") != ""`)
+    # would emit `"changelog": null` here instead of omitting the key.
+    monkeypatch.delenv("CHANGELOG", raising=False)
+    result = run_payload({})
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert "changelog" not in payload["client_payload"]
 
 
 # -- Additional edge-case coverage (not required to demonstrate RED individually) --

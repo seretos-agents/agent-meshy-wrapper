@@ -3,12 +3,14 @@ name: release
 # Manual release flow:
 #   1. Trigger via Actions tab -> "Run workflow" -> enter version (e.g. 0.0.1)
 #      or via CLI: gh workflow run release.yml -f version=0.0.1
-#   2. Workflow stamps version into plugin.json (in CI only), pushes an orphan
+#   2. Workflow validates the version and pre-flight state (see Pre-flight
+#      step), stamps version into plugin.json (in CI only), pushes an orphan
 #      release branch with install-ready files, creates the
 #      agent-meshy-wrapper--v{version} tag on that commit, and publishes a
-#      GitHub Release with the zip attached.
+#      GitHub Release whose notes are generated from main's history (via
+#      src/<TAG> marker tags -- see AGENTS.md) with the zip attached.
 #   3. The workflow then notifies agent-marketplace directly via
-#      MARKETPLACE_DISPATCH_TOKEN.
+#      MARKETPLACE_DISPATCH_TOKEN, forwarding the same notes as `changelog`.
 on:
   workflow_dispatch:
     inputs:
@@ -21,35 +23,41 @@ permissions:
   contents: write
 
 jobs:
+  # Everything lives in this one job -- not split into "stamp"/"assemble" --
+  # so that $RUNNER_TEMP and steps.preflight.outputs.* reach every later
+  # step without artifacts or job outputs. A split would need a fresh
+  # checkout in the second job plus job-level outputs for no benefit.
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Validate version is semver
-        shell: bash
-        run: |
-          V="${{ inputs.version }}"
-          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fail if tag already exists
+      # Read-only: validates the version (strict SemVer via
+      # prev-release-tag.sh), proves HEAD is the default branch's tip (the
+      # only pre-side-effect check that GITHUB_TOKEN is about to act on what
+      # was actually approved), and refuses if the release tag or its source
+      # marker already exists, or if the previous release's source marker is
+      # missing (see AGENTS.md's one-time bootstrap). Replaces the old
+      # "Validate version is semver" and "Fail if tag already exists" steps
+      # with the same tight grammar prev-release-tag.sh enforces.
+      - name: Pre-flight
+        id: preflight
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
-          if gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
-            exit 1
-          fi
+          bash .github/scripts/release-preflight.sh "$PLUGIN_NAME" "${{ inputs.version }}"
+
+          # "git checkout --orphan" + "git clean -fdx" below wipes the
+          # worktree, including .github/scripts -- stash a copy outside it
+          # now so the Dispatch step can still call marketplace-payload.sh.
+          mkdir -p "$RUNNER_TEMP/release-scripts"
+          cp -a .github/scripts/. "$RUNNER_TEMP/release-scripts/"
 
       - name: Stamp version into plugin manifests (in CI only)
         shell: bash
@@ -89,6 +97,21 @@ jobs:
 
           echo "stage=$STAGE"      >> "$GITHUB_OUTPUT"
           echo "zip=dist/$ZIPNAME" >> "$GITHUB_OUTPUT"
+
+      # First remote side effect of the run (unconditional, no exists-guard:
+      # Pre-flight already proved the src/<TAG> marker is absent). This tags
+      # the pristine main commit -- the orphan branch created below has no
+      # ancestry back to it, so this tag is the only durable link from a
+      # release to the history that produced it.
+      - name: Push source marker tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
+          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          MAIN_SHA="${{ steps.preflight.outputs.main_sha }}"
+          git push origin "${MAIN_SHA}:refs/tags/src/${TAG}"
 
       - name: Push orphan release branch and capture commit
         id: rel
@@ -145,6 +168,28 @@ jobs:
           SHA=$(git rev-parse HEAD)
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
+      # Notes are generated from main's history between src/<TAG> markers,
+      # not from the orphan tag (which has no ancestry and would otherwise
+      # yield an empty "Full Changelog" against only the release bot commit).
+      - name: Generate release notes from main
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
+          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          MAIN_SHA="${{ steps.preflight.outputs.main_sha }}"
+          PREV_TAG="${{ steps.preflight.outputs.prev_tag }}"
+
+          ARGS=(-f "tag_name=src/${TAG}" -f "target_commitish=${MAIN_SHA}")
+          if [ -n "$PREV_TAG" ]; then
+            ARGS+=(-f "previous_tag_name=src/${PREV_TAG}")
+          fi
+
+          gh api "repos/${{ github.repository }}/releases/generate-notes" "${ARGS[@]}" --jq .body \
+            > "$RUNNER_TEMP/notes.md"
+
       - name: Create tag and GitHub Release
         shell: bash
         env:
@@ -152,11 +197,15 @@ jobs:
         run: |
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
           TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          # --generate-notes and --notes-start-tag both walk ancestry from the
+          # target commit; the orphan release commit has none, so notes are
+          # generated separately (above, from main) and attached via
+          # --notes-file instead.
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --target "${{ steps.rel.outputs.sha }}" \
             --title "$TAG" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
             "${{ steps.rel.outputs.asset }}"
 
@@ -166,29 +215,26 @@ jobs:
       - name: Dispatch to agent-marketplace
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
           VERSION: ${{ inputs.version }}
         run: |
           DESC=$(jq -r '.description' .claude-plugin/plugin.json)
           NAME=$(jq -r '.name'        .claude-plugin/plugin.json)
           TAG="${NAME}--v${VERSION}"
-          PAYLOAD=$(cat <<EOF
-          {
-            "event_type": "plugin-release",
-            "client_payload": {
-              "name":        "${NAME}",
-              "description": "${DESC}",
-              "repo":        "${{ github.repository }}",
-              "category":    "skill",
-              "version":     "${VERSION}",
-              "ref":         "${TAG}",
-              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
-              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md",
-              "tags":        ["3d", "creative", "ai"]
-            }
-          }
-          EOF
-          )
+          REPO="${{ github.repository }}"
+
+          # The sentinel ("&& printf x" / strip trailing "x") preserves a
+          # genuine trailing newline in the release body through command
+          # substitution, which would otherwise strip all trailing newlines.
+          # This is the only trim applied anywhere in this pipeline --
+          # marketplace-payload.sh below passes CHANGELOG through untouched.
+          CHANGELOG=$(gh release view "$TAG" --repo "$REPO" --json body --jq .body && printf x)
+          CHANGELOG="${CHANGELOG%x}"
+          CHANGELOG="${CHANGELOG%$'\n'}"
+
+          PAYLOAD=$(NAME="$NAME" DESC="$DESC" REPO="$REPO" VERSION="$VERSION" TAG="$TAG" CHANGELOG="$CHANGELOG" \
+            bash "$RUNNER_TEMP/release-scripts/marketplace-payload.sh")
 
           # Staging first (lands straight to main, no review), then the
           # curated marketplace (opens a review PR) -- same payload, two
