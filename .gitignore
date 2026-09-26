@@ -6,3 +6,5 @@ Thumbs.db
 
 # Meshy downloads land here when the agent runs in this repo.
 meshy_output/
+.adev/
+.serena/
