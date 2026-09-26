@@ -1,0 +1,30 @@
+{
+  "name": "agent-meshy-wrapper",
+  "description": "Pairs the official Meshy MCP server with a skill so Claude can generate, refine, rig, animate and export 3D assets from text or images - tracking async jobs and credit cost - instead of hand-driving the Meshy API.",
+  "version": "0.0.3",
+  "author": {
+    "name": "Arne von Appen"
+  },
+  "dependencies": [],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Meshy API key",
+      "description": "Your Meshy API key (starts with msy_). Create one at https://www.meshy.ai/api-keys - a Pro or higher plan is required for API access. Every generation spends credits from this account.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "meshy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@meshy-ai/meshy-mcp-server@0.4.0"
+      ],
+      "env": {
+        "MESHY_API_KEY": "${user_config.api_key}"
+      }
+    }
+  }
+}
