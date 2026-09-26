@@ -3,6 +3,10 @@
 .DS_Store
 Thumbs.db
 *.log
+__pycache__/
+.pytest_cache/
 
 # Meshy downloads land here when the agent runs in this repo.
 meshy_output/
+.adev/
+.serena/
