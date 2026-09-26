@@ -30,7 +30,7 @@ TAG="${PLUGIN}--v${VERSION}"
 # 1. Validate the version and resolve the previous release tag (if any).
 #    prev-release-tag.sh exits 2 on invalid semver -- any nonzero here is a
 #    validation failure, and nothing has been written to $GITHUB_OUTPUT yet.
-if ! PREV_TAG="$("$SCRIPT_DIR/prev-release-tag.sh" "$PLUGIN" "$VERSION")"; then
+if ! PREV_TAG="$(bash "$SCRIPT_DIR/prev-release-tag.sh" "$PLUGIN" "$VERSION")"; then
   echo "::error::Version '$VERSION' failed validation (see prev-release-tag.sh output above)." >&2
   exit 1
 fi
